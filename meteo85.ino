@@ -19,8 +19,7 @@ GyverBME280 bme;
 
 bool isSleeping;
 
-uint8_t temp, humidity;
-uint16_t pressurePa;
+uint8_t temp, humidity, pressure;
 uint32_t standbyTimer, updateTimer;
 
 void setup() {
@@ -42,7 +41,7 @@ void loop() {
     temp = (uint8_t)bme.readTemperature();
     humidity = (uint8_t)bme.readHumidity();
 
-    pressurePa = (uint8_t)bme.readPressure();
+    pressure = bme.readPressure() / 1000;    
 
     if (readVcc() < 2800) showLowBatteryAlert();
     else display();
@@ -57,11 +56,41 @@ void loop() {
 
 #if (DISPLAY_MODE == 1)
 void display() {
-  oled.clear();
-  oled.drawLineH(32, 10, 110);
-  oled.drawLineV(64, 20, 50);
-  oled.printFast("F");
-  oled.printCharFast('F');
+  oled.drawLineH(Y / 2, 0, X);
+  oled.drawLineV(X / 2, 0, Y);
+  
+  // Temperature
+  oled.setTextScale(2);
+  oled.setCursor(9, 10);
+  printNumber(temp);
+
+  oled.setCursor(45, 10);
+  oled.printCharFast('C');
+
+  // Humidity 
+  oled.setCursor(9, 42);
+  printNumber(humidity);
+
+  oled.setCursor(45, 42);
+  oled.printCharFast('%');
+
+  // Date / Time
+  oled.setTextScale(1);
+  oled.setCursor(81, 10);
+  printNumber(rtc.getHours());
+  oled.printCharFast(':');
+  printNumber(rtc.getMinutes());
+
+  char date[10];
+  rtc.getDateChar(date);
+  oled.setCursor(70, 18);
+  oled.printFast(date);
+
+  // Pressure
+  oled.setTextScale(2);
+  oled.setCursor(70, 42);
+  printNumber(pressure);
+  oled.printFast("KPa");
 }
 
 #elif (DISPLAY_MODE == 2)
@@ -74,6 +103,26 @@ void display() {
 #endif
 
 void showLowBatteryAlert() {
+  oled.setTextScale(3);
+  oled.setCursor(39, 20);
+  oled.printFast("LOW");
+
+  oled.setTextScale(1);
+  oled.setCursor(37, 42);
+  oled.printFast("BATTERY!");
+}
+
+void printNumber(int number) {
+  uint8_t digits[10];
+  uint8_t amount;
+  while (number != 0) {
+    amount++;
+    digits[amount - 1] = number % 10;
+    number /= 10;
+  }
+  for (uint8_t i = amount; i >= 0; i--) {
+    oled.printCharFast(digits[i]);
+  }
 }
 
 ISR(PCINT0_VECT) {
@@ -107,6 +156,6 @@ long readVcc() {
   uint8_t low = ADCL;   // must read ADCL first - it then locks ADCH
   uint8_t high = ADCH;  // unlocks both
   long result = (high << 8) | low;
-  result = 1.1 * 1023 * 1000 / result;  // расчёт реального VCC
-  return result;                        // возвращает VCC
+  result = 1.1 * 1023 * 1000 / result;
+  return result;
 }
