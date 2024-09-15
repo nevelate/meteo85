@@ -1,13 +1,13 @@
-#include "src/GyverPower/src/GyverPower.h"
-#include "src/GyverOLED/src/GyverOLED.h"
-#include "src/GyverBME280/src/GyverBME280.h"
-#include "src/microDS3231/src/microDS3231.h"
+#include <GyverPower.h>
+#include <GyverBME280.h>
+#include <microDS3231.h>
+#include <tiny1106.h>
 
 MicroDS3231 rtc;
-GyverOLED oled;
+Oled oled;
 GyverBME280 bme;
 
-#define PWR 1  // MOSFET transistor Gate pin
+#define GATE 1  // MOSFET transistor Gate pin
 
 #define X 128
 #define Y 64
@@ -15,20 +15,23 @@ GyverBME280 bme;
 #define DISPLAY_MODE 1  // 1, 2 or 3
 
 #define UPDATE_PERIOD 1000
-#define STANDBY_PERIOD 10000
+#define STANDBY_PERIOD 15000
+
+bool isSleeping;
 
 uint8_t temp, humidity;
 uint16_t pressurePa;
 uint32_t standbyTimer, updateTimer;
 
 void setup() {
-  pinMode(3, INPUT);     // Interrupt pin
-  pinMode(PWR, OUTPUT);  // MOSFET transistor Gate pin
-  digitalWrite(PWR, HIGH);
+  pinMode(3, INPUT);      // Interrupt pin
+  pinMode(GATE, OUTPUT);  // MOSFET transistor Gate pin
+  digitalWrite(GATE, HIGH);
 
   GIMSK = 0b00100000;  // Enable pin change interrupt
   PCMSK = 0b00001000;  // Pin change interrupt for PB3
 
+  isSleeping = true;
   power.sleep(SLEEP_FOREVER);
 }
 
@@ -41,45 +44,24 @@ void loop() {
 
     pressurePa = (uint8_t)bme.readPressure();
 
-    display();
+    if (readVcc() < 2800) showLowBatteryAlert();
+    else display();
   }
 
   if ((long)millis() - standbyTimer > STANDBY_PERIOD) {
-    digitalWrite(PWR, LOW);
+    isSleeping = true;
+    digitalWrite(GATE, LOW);
     power.sleep(SLEEP_FOREVER);  // sleep after STANDBY_PERIOD
   }
 }
 
 #if (DISPLAY_MODE == 1)
 void display() {
-  oled.fastLineH(Y / 2, 0, X);
-  oled.fastLineV(X / 2, 0, Y);
-
-  oled.setScale(2);
-  oled.setCursorXY(20, 3 >> 3);
-  oled.print(temp);
-  oled.print(F(" C"));
-
-  oled.setCursorXY(20, 7 >> 3);
-  oled.print(humidity);
-  oled.print(F(" %"));
-
-  oled.setCursorXY(84, 7 >> 3);
-  oled.print(pressurePa);
-  oled.print(F(" PA"));
-
-  oled.setScale(1);
-  oled.setCursorXY(84, 2 >> 3);
-  oled.print(rtc.getHours());
-  oled.print(":");
-  oled.print(rtc.getMinutes());
-
-  oled.setCursorXY(84, 3 >> 3);
-  oled.print(rtc.getDate());
-  oled.print(":");
-  oled.print(rtc.getMonth());  
-  oled.print(":");
-  oled.print(rtc.getYear());
+  oled.clear();
+  oled.drawLineH(32, 10, 110);
+  oled.drawLineV(64, 20, 50);
+  oled.printFast("F");
+  oled.printCharFast('F');
 }
 
 #elif (DISPLAY_MODE == 2)
@@ -91,13 +73,40 @@ void display() {
 }
 #endif
 
-ISR(PCINT0_VECT) {
-  power.wakeUp();
-  digitalWrite(PWR, HIGH);
-  standbyTimer = millis();
+void showLowBatteryAlert() {
+}
 
-  //--------Initializing parts----------
-  rtc.begin();
-  oled.init();
-  bme.begin();
+ISR(PCINT0_VECT) {
+  if (isSleeping) {
+    power.wakeUp();
+    digitalWrite(GATE, HIGH);
+    standbyTimer = millis();
+    isSleeping = false;
+
+    //--------Initializing parts----------
+    rtc.begin();
+    bme.begin();
+    oled.init();
+  }
+}
+
+long readVcc() {
+#if defined(__AVR_ATmega32U4__) || defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
+  ADMUX = _BV(REFS0) | _BV(MUX4) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+#elif defined(__AVR_ATtiny24__) || defined(__AVR_ATtiny44__) || defined(__AVR_ATtiny84__)
+  ADMUX = _BV(MUX5) | _BV(MUX0);
+#elif defined(__AVR_ATtiny25__) || defined(__AVR_ATtiny45__) || defined(__AVR_ATtiny85__)
+  ADMUX = _BV(MUX3) | _BV(MUX2);
+#else
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+#endif
+  delay(2);             // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC);  // Start conversion
+  while (bit_is_set(ADCSRA, ADSC))
+    ;                   // measuring
+  uint8_t low = ADCL;   // must read ADCL first - it then locks ADCH
+  uint8_t high = ADCH;  // unlocks both
+  long result = (high << 8) | low;
+  result = 1.1 * 1023 * 1000 / result;  // расчёт реального VCC
+  return result;                        // возвращает VCC
 }
