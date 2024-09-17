@@ -1,4 +1,6 @@
-#include <GyverPower.h>
+#include <avr/sleep.h>
+#include <avr/interrupt.h>
+
 #include <GyverBME280.h>
 #include <microDS3231.h>
 #include <tiny1106.h>
@@ -17,21 +19,17 @@ GyverBME280 bme;
 #define UPDATE_PERIOD 1000
 #define STANDBY_PERIOD 15000
 
-bool isSleeping;
+bool isLowBattery;
 
 uint8_t temp, humidity, pressure;
 uint32_t standbyTimer, updateTimer;
 
 void setup() {
-  pinMode(3, INPUT);      // Interrupt pin
+  pinMode(3, INPUT_PULLUP);      // Interrupt pin
   pinMode(GATE, OUTPUT);  // MOSFET transistor Gate pin
-  digitalWrite(GATE, HIGH);
+  digitalWrite(GATE, LOW);
 
-  GIMSK = 0b00100000;  // Enable pin change interrupt
-  PCMSK = 0b00001000;  // Pin change interrupt for PB3
-
-  isSleeping = true;
-  power.sleep(SLEEP_FOREVER);
+  sleep();
 }
 
 void loop() {
@@ -41,24 +39,26 @@ void loop() {
     temp = (uint8_t)bme.readTemperature();
     humidity = (uint8_t)bme.readHumidity();
 
-    pressure = bme.readPressure() / 1000;    
+    pressure = bme.readPressure() / 1000;
 
+    if (isLowBattery ^ readVcc() < 2800) oled.clear();
     if (readVcc() < 2800) showLowBatteryAlert();
     else display();
   }
 
   if ((long)millis() - standbyTimer > STANDBY_PERIOD) {
-    isSleeping = true;
     digitalWrite(GATE, LOW);
-    power.sleep(SLEEP_FOREVER);  // sleep after STANDBY_PERIOD
+    sleep();  // sleep after STANDBY_PERIOD
   }
 }
 
 #if (DISPLAY_MODE == 1)
 void display() {
+  isLowBattery = false;
+
   oled.drawLineH(Y / 2, 0, X);
   oled.drawLineV(X / 2, 0, Y);
-  
+
   // Temperature
   oled.setTextScale(2);
   oled.setCursor(9, 10);
@@ -67,7 +67,7 @@ void display() {
   oled.setCursor(45, 10);
   oled.printCharFast('C');
 
-  // Humidity 
+  // Humidity
   oled.setCursor(9, 42);
   printNumber(humidity);
 
@@ -83,14 +83,14 @@ void display() {
 
   char date[10];
   rtc.getDateChar(date);
-  oled.setCursor(70, 18);
+  oled.setCursor(66, 18);
   oled.printFast(date);
 
   // Pressure
   oled.setTextScale(2);
   oled.setCursor(70, 42);
   printNumber(pressure);
-  oled.printFast("KPa");
+  oled.printFast(" k");
 }
 
 #elif (DISPLAY_MODE == 2)
@@ -103,52 +103,71 @@ void display() {
 #endif
 
 void showLowBatteryAlert() {
+  isLowBattery = true;
+
   oled.setTextScale(3);
-  oled.setCursor(39, 20);
+  oled.setCursor(37, 20);
   oled.printFast("LOW");
 
   oled.setTextScale(1);
-  oled.setCursor(37, 42);
+  oled.setCursor(40, 34);
   oled.printFast("BATTERY!");
+  oled.setCursor(52, 42);
+  printNumber(readVcc());
 }
 
-void printNumber(int number) {
+void printNumber(unsigned int number) {
   uint8_t digits[10];
   uint8_t amount;
-  while (number != 0) {
-    amount++;
-    digits[amount - 1] = number % 10;
+  for (uint8_t i = 0; i < 10; i++) {
+    digits[i] = number % 10;
     number /= 10;
+    if (number == 0) {
+      amount = i;
+      break;
+    }
   }
   for (uint8_t i = amount; i >= 0; i--) {
-    oled.printCharFast(digits[i]);
+    oled.printCharFast(digits[i] + 48);
   }
 }
 
-ISR(PCINT0_VECT) {
-  if (isSleeping) {
-    power.wakeUp();
-    digitalWrite(GATE, HIGH);
-    standbyTimer = millis();
-    isSleeping = false;
+ISR(PCINT0_vect) {
+  digitalWrite(GATE, HIGH);
+  standbyTimer = millis();
 
-    //--------Initializing parts----------
-    rtc.begin();
-    bme.begin();
-    oled.init();
-  }
+  //--------Initializing parts----------
+  rtc.begin();
+  bme.begin();
+  oled.init();
+}
+
+void sleep() {
+  GIMSK |= _BV(PCIE);    // Enable Pin Change Interrupts
+  PCMSK |= _BV(PCINT3);  // Use PB3 as interrupt pin
+  ADCSRA &= ~_BV(ADEN);  // ADC off (saves power)
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+
+  sleep_enable();  // Sets the Sleep Enable bit in the MCUCR Register (SE BIT)
+  sei();           // Enable interrupts
+  sleep_cpu();     // Put the microcontroller to sleep
+
+  // Code execution stops here since the microcontroller is now asleep.  When the button connected to PB3
+  // is pressed the microcontroller will awake, run the code in the interrupt service routine (ISR),
+  // and then continue executing the code starting from here.
+
+  cli();  // Disable interrupts
+
+  PCMSK &= ~_BV(PCINT3);  // Turn off PB3 as interrupt pin
+  sleep_disable();        // Clear SE bit
+  ADCSRA |= _BV(ADEN);    // ADC on (we turned it off the save power)
+
+  sei();  // Enable interrupts
 }
 
 long readVcc() {
-#if defined(__AVR_ATmega32U4__) || defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
-  ADMUX = _BV(REFS0) | _BV(MUX4) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
-#elif defined(__AVR_ATtiny24__) || defined(__AVR_ATtiny44__) || defined(__AVR_ATtiny84__)
-  ADMUX = _BV(MUX5) | _BV(MUX0);
-#elif defined(__AVR_ATtiny25__) || defined(__AVR_ATtiny45__) || defined(__AVR_ATtiny85__)
-  ADMUX = _BV(MUX3) | _BV(MUX2);
-#else
-  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
-#endif
+  ADMUX = _BV(MUX3) | _BV(MUX2); // Attiny 25/45/85
+
   delay(2);             // Wait for Vref to settle
   ADCSRA |= _BV(ADSC);  // Start conversion
   while (bit_is_set(ADCSRA, ADSC))
