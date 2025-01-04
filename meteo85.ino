@@ -136,7 +136,7 @@ ISR(PCINT0_vect) {
   digitalWrite(GATE, HIGH);
   standbyTimer = millis();
 
-  //--------Initializing parts----------
+  //--------Initialize parts----------
   rtc.begin();
   bme.begin();
   oled.init();
